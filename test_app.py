@@ -1,15 +1,25 @@
 import os
 import pytest
-from app import app, mongo
+from pymongo import MongoClient
 from bson.objectid import ObjectId
+from app import app, mongo
+
+TEST_DB_URI = "mongodb://localhost:27017/test_student_db"
 
 @pytest.fixture
 def client():
     app.config["TESTING"] = True
-    app.config["MONGO_URI"] = "mongodb://localhost:27017/test_student_db"  # test DB
-    client = app.test_client()
+    app.config["MONGO_URI"] = TEST_DB_URI
 
-    # Setup: clear and create test data
+    # Connect directly to the local test database
+    direct_client = MongoClient(TEST_DB_URI)
+    test_db = direct_client["test_student_db"]
+    
+    # Explicitly bind the app's PyMongo instances to the test database connection
+    mongo.db = test_db
+    mongo.cx = direct_client
+
+    # Setup: clear and populate test data
     with app.app_context():
         mongo.db.students.delete_many({})
         mongo.db.students.insert_one({
@@ -18,11 +28,14 @@ def client():
             "email": "test@student.com",
             "course": "Flask"
         })
-    yield client
 
-    # Teardown: drop DB after test
+    with app.test_client() as test_client:
+        yield test_client
+
+    # Teardown: drop test database and close connection
     with app.app_context():
-        mongo.cx.drop_database("test_student_db")
+        direct_client.drop_database("test_student_db")
+        direct_client.close()
 
 
 def test_home_page(client):
