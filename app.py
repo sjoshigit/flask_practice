@@ -62,10 +62,17 @@ def delete_student(student_id):
 @app.route('/health', methods=['GET'])
 def health():
     try:
-        mongo.db.command('ping')
-        return {"status": "healthy", "database": "connected"}, 200
+        # Check client connection
+        if mongo.cx:
+            mongo.cx.admin.command('ping')
+            return {"status": "healthy", "database": "connected"}, 200
+        elif mongo.db:
+            mongo.db.command('ping')
+            return {"status": "healthy", "database": "connected"}, 200
+        else:
+            return {"status": "unhealthy", "error": "Database not initialized"}, 500
     except Exception as e:
-        return {"status": "unhealthy", "error": str(e)}, 500    
+        return {"status": "unhealthy", "error": str(e)}, 500  
 
 if __name__ == '__main__':
     app.run(host="0.0.0.0", debug=True, port=5000)
