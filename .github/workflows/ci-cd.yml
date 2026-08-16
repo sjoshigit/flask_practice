@@ -1,0 +1,146 @@
+name: Flask CI/CD Pipeline
+
+on:
+  push:
+    branches: [ "main" ]
+
+env:
+  AWS_REGION: ap-south-1
+  ECR_REPOSITORY: flask-app-sjoshi
+  IMAGE_TAG: ${{ github.sha }}
+
+jobs:
+  # Stage 1-3: Checkout, Install, Test
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
+
+      - name: Run Pytest Suite
+        id: run_tests
+        run: pytest
+
+      - name: Send Test Failure Email
+        if: failure()
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: ${{ secrets.SMTP_SERVER }}
+          server_port: ${{ secrets.SMTP_PORT }}
+          username: ${{ secrets.SMTP_USERNAME }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          subject: "❌ Deployment FAILED at Test Stage: ${{ github.repository }}"
+          to: ${{ secrets.NOTIFICATION_EMAIL }}
+          from: "CI/CD Pipeline"
+          body: |
+            Pipeline failed at the TEST stage.
+            
+            - Commit: ${{ github.sha }}
+            - Branch: ${{ github.ref_name }}
+            - Failed Stage: Pytest / Unit Tests
+            - Logs: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+  # Stage 4-7: Build, Push, Deploy, Verify
+  build-and-deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and Push Docker Image
+        id: build_push
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          echo "IMAGE_URI=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_ENV
+
+      - name: Deploy to EC2 via SSH
+        id: deploy_ec2
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          envs: IMAGE_URI,IMAGE_TAG
+          script: |
+            # Authenticate Docker to ECR on EC2 (ap-south-1)
+            aws ecr get-login-password --region ap-south-1 | docker login --username AWS --password-stdin $(echo $IMAGE_URI | cut -d/ -f1)
+            
+            # Pull newly built image
+            docker pull $IMAGE_URI
+            
+            # Stop and remove old container
+            docker stop flask_app || true
+            docker rm flask_app || true
+            
+            # Run new container
+            docker run -d --name flask_app --restart unless-stopped -p 5000:5000 -e MONGO_URI="${{ secrets.MONGO_URI }}" $IMAGE_URI
+            
+            # Verification gate: poll health check endpoint
+            sleep 5
+            curl --fail http://localhost:5000/health || exit 1
+
+      # Stage 8: Notifications
+      - name: Send Success Email
+        if: success()
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: ${{ secrets.SMTP_SERVER }}
+          server_port: ${{ secrets.SMTP_PORT }}
+          username: ${{ secrets.SMTP_USERNAME }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          subject: "✅ Deployment SUCCESS: ${{ github.repository }} (${{ github.sha }})"
+          to: ${{ secrets.NOTIFICATION_EMAIL }}
+          from: "CI/CD Pipeline"
+          body: |
+            Pipeline completed successfully!
+            
+            - Commit: ${{ github.sha }}
+            - Branch: ${{ github.ref_name }}
+            - Docker Image Tag: ${{ env.IMAGE_TAG }}
+            - Target EC2 Host: ${{ secrets.EC2_HOST }}
+            - Pipeline Run: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+      - name: Send Build/Deploy Failure Email
+        if: failure()
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: ${{ secrets.SMTP_SERVER }}
+          server_port: ${{ secrets.SMTP_PORT }}
+          username: ${{ secrets.SMTP_USERNAME }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          subject: "❌ Deployment FAILED at Build/Deploy Stage: ${{ github.repository }}"
+          to: ${{ secrets.NOTIFICATION_EMAIL }}
+          from: "CI/CD Pipeline"
+          body: |
+            Pipeline failed during Build, Push, or Deploy stage.
+            
+            - Commit: ${{ github.sha }}
+            - Branch: ${{ github.ref_name }}
+            - Target EC2 Host: ${{ secrets.EC2_HOST }}
+            - Logs: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
