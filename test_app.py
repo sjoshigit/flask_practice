@@ -1,6 +1,7 @@
 import pytest
 from app import app, mongo
 from bson.objectid import ObjectId
+from dotenv import load_dotenv
 import os
 
 @pytest.fixture
